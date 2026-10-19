@@ -1,0 +1,39 @@
+# Fork only: merge SpencerO21/herdr-plugin-callstack main into this main daily,
+# keeping local commits (configurable diff tool) on top. A conflict or failing
+# test fails the job and nothing is pushed.
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Merge upstream main
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch https://github.com/SpencerO21/herdr-plugin-callstack.git main
+          if git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "Already up to date."
+          else
+            git merge --no-edit FETCH_HEAD
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Test
+        if: steps.merge.outputs.changed == 'true'
+        run: cargo test --locked
+      - name: Push
+        if: steps.merge.outputs.changed == 'true'
+        run: git push origin main
