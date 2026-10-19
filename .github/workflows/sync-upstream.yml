@@ -1,6 +1,9 @@
-# Fork only: merge SpencerO21/herdr-plugin-callstack main into this main daily,
-# keeping local commits (configurable diff tool) on top. A conflict or failing
-# test fails the job and nothing is pushed.
+# Fork only: merge SpencerO21/herdr-plugin-callstack main into this main daily, keeping local commits on
+# top. A clean merge that passes tests is pushed. A conflict or failing test
+# opens a PR from sync/upstream (upstream's main) instead, to resolve by hand;
+# while that PR is open, later runs leave its branch alone.
+# Upstream changes to .github/workflows can only be pushed with SYNC_TOKEN, a
+# token with contents, pull requests and workflows write; github.token can't.
 name: Sync upstream
 
 on:
@@ -10,6 +13,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   sync:
@@ -19,6 +23,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
       - name: Merge upstream main
         id: merge
         run: |
@@ -27,13 +32,35 @@ jobs:
           git fetch https://github.com/SpencerO21/herdr-plugin-callstack.git main
           if git merge-base --is-ancestor FETCH_HEAD HEAD; then
             echo "Already up to date."
+            exit 0
+          fi
+          echo "upstream=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
+          if git merge --no-edit FETCH_HEAD; then
+            echo "status=merged" >> "$GITHUB_OUTPUT"
           else
-            git merge --no-edit FETCH_HEAD
-            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git merge --abort
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
           fi
       - name: Test
-        if: steps.merge.outputs.changed == 'true'
+        id: test
+        if: steps.merge.outputs.status == 'merged'
+        continue-on-error: true
         run: cargo test --locked
       - name: Push
-        if: steps.merge.outputs.changed == 'true'
+        if: steps.merge.outputs.status == 'merged' && steps.test.outcome == 'success'
         run: git push origin main
+      - name: Open PR
+        if: steps.merge.outputs.status == 'conflict' || steps.test.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+          REASON: ${{ steps.merge.outputs.status == 'conflict' && 'conflicts with' || 'fails tests after merging into' }}
+        run: |
+          open=$(gh pr list --repo "$GITHUB_REPOSITORY" --head sync/upstream --state open --json number --jq length)
+          if [ "$open" != 0 ]; then
+            echo "A sync/upstream PR is already open."
+            exit 0
+          fi
+          git push --force origin "${{ steps.merge.outputs.upstream }}:refs/heads/sync/upstream"
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head sync/upstream \
+            --title "Sync SpencerO21/herdr-plugin-callstack main" \
+            --body "Upstream SpencerO21/herdr-plugin-callstack@main $REASON main. Resolve here, then merge. Opened by .github/workflows/sync-upstream.yml."
